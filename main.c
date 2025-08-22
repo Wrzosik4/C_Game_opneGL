@@ -5,6 +5,8 @@
 #include <GL/glut.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
+#include <windows.h>
 
 #define MAP_WIDTH 16
 #define MAP_HEIGHT 16
@@ -12,6 +14,10 @@
 #define SCREEN_HEIGHT_DEFAULT 600
 #define FOV 60
 #define PI 3.14159265359
+#define SAVE_VERSION 1
+#define MAX_SAVES 10
+#define LOAD_GAME_STATE 4
+#define DELETE_CONFIRM_STATE 5
 
 typedef struct {
     float x, y;
@@ -21,8 +27,12 @@ typedef struct {
     int score;
 } Player;
 
-Player player = {2.0f, 2.0f, 0.0f, FOV};
+typedef struct {
+    char filename[256];
+    time_t saveTime;
+} SaveEntry;
 
+Player player = {2.0f, 2.0f, 0.0f, FOV};
 int worldMap[MAP_HEIGHT][MAP_WIDTH] = {
     {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1},
     {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
@@ -30,7 +40,7 @@ int worldMap[MAP_HEIGHT][MAP_WIDTH] = {
     {1,0,0,1,1,0,0,0,0,0,0,1,1,0,0,1},
     {1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1},
     {1,0,0,1,0,0,0,1,1,0,0,0,1,0,0,1},
-    {1,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1},
+    {1,0,0,0,0,1,1,1,0,0,0,1,1,0,0,1},
     {1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,1},
     {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1},
     {1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1},
@@ -58,6 +68,13 @@ int selectedPauseMenuItem = 0;
 const char* pauseMenuItems[] = {"Resume", "Save Game", "Load Game", "Settings", "Main Menu"};
 const int numPauseMenuItems = 5;
 
+int selectedSaveItem = 0;
+SaveEntry saveList[MAX_SAVES];
+int numSaves = 0;
+int deleteMode = 0; // 0 = normal mode, 1 = delete mode
+int deleteConfirmItem = -1; // indeks save'a do usunięcia
+int selectedConfirmButton = 0; // 0 = Tak, 1 = Nie
+
 int previousState = 0;
 int screenWidth = SCREEN_WIDTH_DEFAULT;
 int screenHeight = SCREEN_HEIGHT_DEFAULT;
@@ -70,6 +87,49 @@ const int screenSizes[][2] = {
     {1920, 1080}
 };
 const int numScreenSizes = 4;
+
+void scanSaves() {
+    numSaves = 0;
+    WIN32_FIND_DATA findFileData;
+    HANDLE hFind = FindFirstFile("*.sav", &findFileData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        printf("Error scanning saves: %d\n", GetLastError());
+        return;
+    }
+
+    do {
+        if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && numSaves < MAX_SAVES) {
+            strncpy(saveList[numSaves].filename, findFileData.cFileName, sizeof(saveList[numSaves].filename));
+            SYSTEMTIME st;
+            FileTimeToSystemTime(&findFileData.ftLastWriteTime, &st);
+            struct tm tm = {0};
+            tm.tm_year = st.wYear - 1900;
+            tm.tm_mon = st.wMonth - 1;
+            tm.tm_mday = st.wDay;
+            tm.tm_hour = st.wHour;
+            tm.tm_min = st.wMinute;
+            tm.tm_sec = st.wSecond;
+            saveList[numSaves].saveTime = mktime(&tm);
+            numSaves++;
+        }
+    } while (FindNextFile(hFind, &findFileData) != 0 && numSaves < MAX_SAVES);
+
+    FindClose(hFind);
+}
+
+void deleteSave(int saveIndex) {
+    if (saveIndex >= 0 && saveIndex < numSaves) {
+        if (remove(saveList[saveIndex].filename) == 0) {
+            printf("Save deleted: %s\n", saveList[saveIndex].filename);
+        } else {
+            printf("Error deleting save: %s\n", saveList[saveIndex].filename);
+        }
+        scanSaves(); // Odśwież listę zapisów
+        if (selectedSaveItem >= numSaves && numSaves > 0) {
+            selectedSaveItem = numSaves - 1;
+        }
+    }
+}
 
 void saveSettings() {
     FILE* file = fopen("settings.dat", "wb");
@@ -89,7 +149,6 @@ void loadSettings() {
         fread(&sizeIndex, sizeof(int), 1, file);
         fclose(file);
 
-        // Poprawiony format dla fovBuffer
         snprintf(fovBuffer, sizeof(fovBuffer), "FOV: %.0f", player.fov);
         settingsItems[0] = fovBuffer;
         settingsItems[1] = soundOn ? "Sound: ON" : "Sound: OFF";
@@ -100,7 +159,6 @@ void loadSettings() {
         screenHeight = screenSizes[sizeIndex][1];
         glutReshapeWindow(screenWidth, screenHeight);
 
-        // Update OpenGL projection and viewport
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         gluOrtho2D(0, screenWidth, 0, screenHeight);
@@ -113,6 +171,56 @@ void loadSettings() {
         settingsItems[1] = "Sound: ON";
         settingsItems[2] = sizeBuffer;
     }
+}
+
+void saveGame(Player *player, const char* saveName) {
+    FILE* file = fopen(saveName, "wb");
+    if (file == NULL) {
+        printf("Game save error\n");
+        return;
+    }
+    int saveVersion = SAVE_VERSION;
+    time_t saveTime = time(NULL);
+    fwrite(&saveVersion, sizeof(int), 1, file);
+    fwrite(&saveTime, sizeof(time_t), 1, file);
+    fwrite(player, sizeof(Player), 1, file);
+    fwrite(worldMap, sizeof(worldMap), 1, file);
+    fclose(file);
+    scanSaves();
+}
+
+void loadGame(Player *player, const char* fileName, time_t* saveTime) {
+    FILE* file = fopen(fileName, "rb");
+    if (file == NULL) {
+        printf("Game load error: %s\n", fileName);
+        return;
+    }
+
+    int saveVersion;
+    if (fread(&saveVersion, sizeof(int), 1, file) != 1 || saveVersion != SAVE_VERSION) {
+        printf("Invalid file format: %s\n", fileName);
+        fclose(file);
+        return;
+    }
+
+    if (fread(saveTime, sizeof(time_t), 1, file) != 1) {
+        printf("Error loading save time: %s\n", fileName);
+        fclose(file);
+        return;
+    }
+
+    if (fread(player, sizeof(Player), 1, file) != 1) {
+        printf("Error loading player data: %s\n", fileName);
+        fclose(file);
+        return;
+    }
+
+    if (fread(worldMap, sizeof(worldMap), 1, file) != 1) {
+        printf("Error loading world map: %s\n", fileName);
+        fclose(file);
+        return;
+    }
+    fclose(file);
 }
 
 void reshape(int w, int h) {
@@ -216,6 +324,142 @@ void drawPause() {
         for (int j = 0; pauseMenuItems[i][j] != '\0'; j++) {
             glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, pauseMenuItems[i][j]);
         }
+    }
+}
+
+void drawDeleteConfirm() {
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glColor3f(0.1f, 0.1f, 0.1f);
+    glBegin(GL_QUADS);
+    glVertex2f(0, 0);
+    glVertex2f(screenWidth, 0);
+    glVertex2f(screenWidth, screenHeight);
+    glVertex2f(0, screenHeight);
+    glEnd();
+
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glRasterPos2i(screenWidth / 2 - 100, screenHeight / 2 + 80);
+    const char* title = "CONFIRM DELETE";
+    for (int i = 0; title[i] != '\0'; i++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, title[i]);
+    }
+
+    glColor3f(1.0f, 0.8f, 0.8f);
+    glRasterPos2i(screenWidth / 2 - 100, screenHeight / 2 + 40);
+    const char* question = "Are you sure you want to delete?:";
+    for (int i = 0; question[i] != '\0'; i++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, question[i]);
+    }
+
+    glColor3f(1.0f, 1.0f, 0.0f);
+    glRasterPos2i(screenWidth / 2 - 100, screenHeight / 2);
+    if (deleteConfirmItem >= 0 && deleteConfirmItem < numSaves) {
+        for (int i = 0; saveList[deleteConfirmItem].filename[i] != '\0'; i++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, saveList[deleteConfirmItem].filename[i]);
+        }
+    }
+
+    // Przyciski Tak/Nie
+    const char* buttons[] = {"YES", "NO"};
+    for (int i = 0; i < 2; i++) {
+        if (i == selectedConfirmButton) {
+            glColor3f(1.0f, 1.0f, 0.0f);
+        } else {
+            glColor3f(1.0f, 1.0f, 1.0f);
+        }
+        glRasterPos2i(screenWidth / 2 - 50 + i * 100, screenHeight / 2 - 40);
+        for (int j = 0; buttons[i][j] != '\0'; j++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, buttons[i][j]);
+        }
+    }
+}
+
+void drawLoadGame() {
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glColor3f(0.1f, 0.1f, 0.1f);
+    glBegin(GL_QUADS);
+    glVertex2f(0, 0);
+    glVertex2f(screenWidth, 0);
+    glVertex2f(screenWidth, screenHeight);
+    glVertex2f(0, screenHeight);
+    glEnd();
+
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glRasterPos2i(screenWidth / 2 - 100, screenHeight / 2 + 100);
+    if (deleteMode) {
+        const char* title = "DELETE SAVES";
+        for (int i = 0; title[i] != '\0'; i++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, title[i]);
+        }
+    } else {
+        const char* title = "LOAD GAME";
+        for (int i = 0; title[i] != '\0'; i++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, title[i]);
+        }
+    }
+
+    if (numSaves == 0) {
+        glColor3f(1.0f, 1.0f, 1.0f);
+        glRasterPos2i(screenWidth / 2 - 50, screenHeight / 2 - 20);
+        const char* noSaves = "No saves found";
+        for (int i = 0; noSaves[i] != '\0'; i++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, noSaves[i]);
+        }
+    } else {
+        for (int i = 0; i < numSaves; i++) {
+            if (i == selectedSaveItem) {
+                if (deleteMode) {
+                    glColor3f(1.0f, 0.3f, 0.3f); // Czerwony w trybie usuwania
+                } else {
+                    glColor3f(1.0f, 1.0f, 0.0f); // Żółty w trybie normalnym
+                }
+            } else {
+                glColor3f(1.0f, 1.0f, 1.0f);
+            }
+            char saveText[256];
+            struct tm* tm_info = localtime(&saveList[i].saveTime);
+            char timeStr[26];
+            strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", tm_info);
+            snprintf(saveText, sizeof(saveText), "%s (%s)", saveList[i].filename, timeStr);
+            glRasterPos2i(screenWidth / 2 - 150, screenHeight / 2 - 20 - i * 40);
+            for (int j = 0; saveText[j] != '\0'; j++) {
+                glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, saveText[j]);
+            }
+        }
+    }
+
+    int buttonY = screenHeight / 2 - 20 - numSaves * 40;
+
+    if (numSaves + 1 == selectedSaveItem) {
+        glColor3f(1.0f, 1.0f, 0.0f);
+    } else {
+        glColor3f(1.0f, 1.0f, 1.0f);
+    }
+    glRasterPos2i(screenWidth / 2 - 150, buttonY);
+    if (deleteMode) {
+        const char* deleteText = "DELETE: ON";
+        for (int i = 0; deleteText[i] != '\0'; i++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, deleteText[i]);
+        }
+    } else {
+        const char* deleteText = "DELETE";
+        for (int i = 0; deleteText[i] != '\0'; i++) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, deleteText[i]);
+        }
+    }
+
+    // Przycisk Back
+    if (numSaves + 2 == selectedSaveItem) {
+        glColor3f(1.0f, 1.0f, 0.0f);
+    } else {
+        glColor3f(1.0f, 1.0f, 1.0f);
+    }
+    glRasterPos2i(screenWidth / 2 - 50, buttonY);
+    const char* back = "Back";
+    for (int i = 0; back[i] != '\0'; i++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, back[i]);
     }
 }
 
@@ -397,6 +641,10 @@ void display() {
         drawSettings();
     } else if (gameState == 3) {
         drawPause();
+    } else if (gameState == LOAD_GAME_STATE) {
+        drawLoadGame();
+    } else if (gameState == DELETE_CONFIRM_STATE) {
+        drawDeleteConfirm();
     }
 
     glutSwapBuffers();
@@ -411,8 +659,11 @@ void keyboard(unsigned char key, int x, int y) {
             gameState = 2;
             selectedSettingsItem = 0;
         } else if (selectedMenuItem == 2) {
-            loadSettings();
-            gameState = 1;
+            scanSaves();
+            selectedSaveItem = 0;
+            deleteMode = 0;
+            previousState = 0;
+            gameState = LOAD_GAME_STATE;
         } else if (selectedMenuItem == 3) {
             exit(0);
         }
@@ -449,10 +700,19 @@ void keyboard(unsigned char key, int x, int y) {
         if (selectedPauseMenuItem == 0) {
             gameState = 1;
         } else if (selectedPauseMenuItem == 1) {
-            saveSettings();
+            char filename[256];
+            time_t now = time(NULL);
+            struct tm* tm_info = localtime(&now);
+            char timeStr[26];
+            strftime(timeStr, sizeof(timeStr), "%Y%m%d_%H%M%S.sav", tm_info);
+            snprintf(filename, sizeof(filename), "save_%s", timeStr);
+            saveGame(&player, filename);
         } else if (selectedPauseMenuItem == 2) {
-            loadSettings();
-            gameState = 1;
+            scanSaves();
+            selectedSaveItem = 0;
+            deleteMode = 0;
+            previousState = 3;
+            gameState = LOAD_GAME_STATE;
         } else if (selectedPauseMenuItem == 3) {
             previousState = 3;
             gameState = 2;
@@ -461,20 +721,57 @@ void keyboard(unsigned char key, int x, int y) {
             gameState = 0;
             selectedMenuItem = 0;
         }
+    } else if (gameState == LOAD_GAME_STATE && key == 13) {
+        if (selectedSaveItem < numSaves) {
+            if (deleteMode) {
+                deleteConfirmItem = selectedSaveItem;
+                selectedConfirmButton = 0;
+                gameState = DELETE_CONFIRM_STATE;
+            } else {
+                time_t saveTime;
+                loadGame(&player, saveList[selectedSaveItem].filename, &saveTime);
+                gameState = 1;
+            }
+        } else if (selectedSaveItem == numSaves + 1) {
+            deleteMode = !deleteMode;
+        } else if (selectedSaveItem == numSaves + 2) {
+            deleteMode = 0;
+            gameState = previousState;
+            if (previousState == 0) selectedMenuItem = 0;
+            else if (previousState == 3) selectedPauseMenuItem = 0;
+        }
+    } else if (gameState == DELETE_CONFIRM_STATE && key == 13) {
+        if (selectedConfirmButton == 0) {
+            deleteSave(deleteConfirmItem);
+            gameState = LOAD_GAME_STATE;
+            if (selectedSaveItem >= numSaves && numSaves > 0) {
+                selectedSaveItem = numSaves - 1;
+            } else if (numSaves == 0) {
+                selectedSaveItem = 0;
+            }
+        } else {
+            gameState = LOAD_GAME_STATE;
+        }
     } else if (gameState == 1) {
         keys[key] = 1;
     }
+
     if (key == 27) {
         if (gameState == 1) {
             gameState = 3;
             selectedPauseMenuItem = 0;
-        } else if (gameState == 2) {
+        } else if (gameState == 2 || gameState == LOAD_GAME_STATE) {
+            if (gameState == LOAD_GAME_STATE) {
+                deleteMode = 0;
+            }
             gameState = previousState;
             if (previousState == 0) selectedMenuItem = 0;
             else if (previousState == 3) selectedPauseMenuItem = 0;
         } else if (gameState == 3) {
             gameState = 1;
             selectedPauseMenuItem = 0;
+        } else if (gameState == DELETE_CONFIRM_STATE) {
+            gameState = LOAD_GAME_STATE;
         } else {
             exit(0);
         }
@@ -510,6 +807,19 @@ void specialKeys(int key, int x, int y) {
             selectedPauseMenuItem = (selectedPauseMenuItem + 1) % numPauseMenuItems;
         }
         glutPostRedisplay();
+    } else if (gameState == LOAD_GAME_STATE) {
+        int maxItems = numSaves + 3; // saves + delete button + back button
+        if (key == GLUT_KEY_UP) {
+            selectedSaveItem = (selectedSaveItem - 1 + maxItems) % maxItems;
+        } else if (key == GLUT_KEY_DOWN) {
+            selectedSaveItem = (selectedSaveItem + 1) % maxItems;
+        }
+        glutPostRedisplay();
+    } else if (gameState == DELETE_CONFIRM_STATE) {
+        if (key == GLUT_KEY_LEFT || key == GLUT_KEY_RIGHT) {
+            selectedConfirmButton = !selectedConfirmButton;
+        }
+        glutPostRedisplay();
     }
 }
 
@@ -521,6 +831,7 @@ void timer(int value) {
 void init() {
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     loadSettings();
+    scanSaves();
 }
 
 int main(int argc, char *argv[]) {
