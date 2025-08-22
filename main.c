@@ -71,9 +71,9 @@ const int numPauseMenuItems = 5;
 int selectedSaveItem = 0;
 SaveEntry saveList[MAX_SAVES];
 int numSaves = 0;
-int deleteMode = 0; // 0 = normal mode, 1 = delete mode
-int deleteConfirmItem = -1; // indeks save'a do usunięcia
-int selectedConfirmButton = 0; // 0 = Tak, 1 = Nie
+int deleteMode = 0;
+int deleteConfirmItem = -1;
+int selectedConfirmButton = 0;
 
 int previousState = 0;
 int screenWidth = SCREEN_WIDTH_DEFAULT;
@@ -84,9 +84,10 @@ const int screenSizes[][2] = {
     {800, 600},
     {1024, 768},
     {1280, 720},
-    {1920, 1080}
+    {1920, 1080},
+    {2560,1440}
 };
-const int numScreenSizes = 4;
+const int numScreenSizes = 5;
 
 void scanSaves() {
     numSaves = 0;
@@ -124,7 +125,7 @@ void deleteSave(int saveIndex) {
         } else {
             printf("Error deleting save: %s\n", saveList[saveIndex].filename);
         }
-        scanSaves(); // Odśwież listę zapisów
+        scanSaves();
         if (selectedSaveItem >= numSaves && numSaves > 0) {
             selectedSaveItem = numSaves - 1;
         }
